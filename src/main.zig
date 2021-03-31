@@ -64,14 +64,6 @@ fn Buffer(comptime max_len: usize) type {
 const Context = struct {
     allocator: *std.mem.Allocator,
     auth_token: []const u8,
-    prng: std.rand.DefaultPrng,
-
-    timer: std.time.Timer,
-
-    ask_mailbox: util.Mailbox(AskData),
-    ask_thread: *std.Thread,
-
-    const AskData = struct { ask: Buffer(0x1000), channel_id: u64 };
 
     pub fn init(allocator: *std.mem.Allocator, auth_token: []const u8) !*Context {
         const result = try allocator.create(Context);
@@ -79,64 +71,8 @@ const Context = struct {
 
         result.allocator = allocator;
         result.auth_token = auth_token;
-        result.prng = std.rand.DefaultPrng.init(@bitCast(u64, std.time.timestamp()));
-
-        result.timer = try std.time.Timer.start();
-
-        result.ask_mailbox = util.Mailbox(AskData).init();
-        result.ask_thread = try std.Thread.spawn(result, askHandler);
 
         return result;
-    }
-
-    pub fn askHandler(self: *Context) void {
-        while (true) {
-            const mailbox = self.ask_mailbox.get();
-            self.askOne(mailbox.channel_id, mailbox.ask.slice()) catch |err| {
-                std.debug.print("{s}\n", .{err});
-            };
-        }
-    }
-
-    pub fn askOne(self: *Context, channel_id: u64, ask: []const u8) !void {
-        const swh = util.Swhash(16);
-        switch (swh.match(ask)) {
-            swh.case("ping") => {
-                _ = try self.sendDiscordMessage(.{
-                    .channel_id = channel_id,
-                    .title = "pong",
-                    .description = &.{
-                        \\```
-                        \\          ,;;;!!!!!;;.
-                        \\        :!!!!!!!!!!!!!!;
-                        \\      :!!!!!!!!!!!!!!!!!;
-                        \\     ;!!!!!!!!!!!!!!!!!!!;
-                        \\    ;!!!!!!!!!!!!!!!!!!!!!
-                        \\    ;!!!!!!!!!!!!!!!!!!!!'
-                        \\    ;!!!!!!!!!!!!!!!!!!!'
-                        \\     :!!!!!!!!!!!!!!!!'
-                        \\      ,!!!!!!!!!!!!!''
-                        \\   ,;!!!''''''''''
-                        \\ .!!!!'
-                        \\!!!!`
-                        \\```
-                    },
-                });
-                return;
-            },
-
-            else => {},
-        }
-    }
-
-    // This breaks out of the passed-in buffer and prepends/postpends with wrapper text.
-    // Thar be dragons 🐉
-    fn wrapString(buffer: []u8, wrapper: []const u8) []u8 {
-        const start_ptr = buffer.ptr - wrapper.len;
-        const frame = start_ptr[0 .. buffer.len + 2 * wrapper.len];
-        std.mem.copy(u8, frame[0..], wrapper);
-        std.mem.copy(u8, frame[buffer.len + wrapper.len ..], wrapper);
-        return frame;
     }
 
     pub fn toggleUserRole(
@@ -196,191 +132,9 @@ const Context = struct {
             },
         }
     }
-
-    const EmbedField = struct { name: []const u8, value: []const u8 };
-
-    pub fn sendDiscordMessage(self: Context, args: struct {
-        channel_id: u64,
-        edit_msg_id: u64 = 0,
-        title: []const u8,
-        color: HexColor = HexColor.black,
-        description: []const []const u8 = &.{},
-        fields: []const EmbedField = &.{},
-        image: ?[]const u8 = null,
-    }) !u64 {
-        var path_buf: [0x100]u8 = undefined;
-
-        const method = if (args.edit_msg_id == 0) "POST" else "PATCH";
-        const path = if (args.edit_msg_id == 0)
-            try std.fmt.bufPrint(&path_buf, "/api/v6/channels/{d}/messages", .{args.channel_id})
-        else
-            try std.fmt.bufPrint(&path_buf, "/api/v6/channels/{d}/messages/{d}", .{ args.channel_id, args.edit_msg_id });
-
-        var req = try request.Https.init(.{
-            .allocator = self.allocator,
-            .pem = @embedFile("../discord-com-chain.pem"),
-            .host = "discord.com",
-            .method = method,
-            .path = path,
-        });
-        defer req.deinit();
-
-        try req.client.writeHeaderValue("Accept", "application/json");
-        try req.client.writeHeaderValue("Content-Type", "application/json");
-        try req.client.writeHeaderValue("Authorization", self.auth_token);
-
-        // Zig has difficulty resolving these peer types
-        const image: ?struct { url: []const u8 } = if (args.image) |url|
-            .{ .url = url }
-        else
-            null;
-
-        const embed = .{
-            .title = args.title,
-            .color = @enumToInt(args.color),
-            .description = format.concat(args.description),
-            .fields = args.fields,
-            .image = image,
-        };
-        try req.printSend("{}", .{
-            format.json(.{
-                .content = "",
-                .tts = false,
-                .embed = embed,
-            }),
-        });
-
-        if (req.expectSuccessStatus()) |_| {
-            try req.completeHeaders();
-
-            var stream = util.streamJson(req.client.reader());
-
-            const root = try stream.root();
-            if (try root.objectMatchAny(&.{"id"})) |match| {
-                var buf: [0x100]u8 = undefined;
-                const id_string = try match.value.stringBuffer(&buf);
-                return try std.fmt.parseInt(u64, id_string, 10);
-            }
-            return error.IdNotFound;
-        } else |err| switch (err) {
-            error.TooManyRequests => {
-                try req.completeHeaders();
-
-                var stream = util.streamJson(req.client.reader());
-                const root = try stream.root();
-
-                if (try root.objectMatch("retry_after")) |match| {
-                    const sec = try match.value.number(f64);
-                    // Don't bother trying for awhile
-                    std.time.sleep(@floatToInt(u64, sec * std.time.ns_per_s));
-                }
-                return error.TooManyRequests;
-            },
-            else => return err,
-        }
-    }
-
-    pub fn requestRun(self: Context, src: [][]const u8, stdout_buf: []u8, stderr_buf: []u8) !RunResult {
-        var req = try request.Https.init(.{
-            .allocator = self.allocator,
-            .pem = @embedFile("../emkc-org-chain.pem"),
-            .host = "emkc.org",
-            .method = "POST",
-            .path = "/api/v1/piston/execute",
-        });
-        defer req.deinit();
-
-        try req.client.writeHeaderValue("Content-Type", "application/json");
-
-        try req.printSend("{}", .{
-            format.json(.{
-                .language = "zig",
-                .source = format.concat(src),
-                .stdin = "",
-                .args = [0][]const u8{},
-            }),
-        });
-
-        _ = try req.expectSuccessStatus();
-        try req.completeHeaders();
-
-        var stream = util.streamJson(req.client.reader());
-        const root = try stream.root();
-
-        var result = RunResult{
-            .stdout = stdout_buf[0..0],
-            .stderr = stderr_buf[0..0],
-        };
-
-        while (try root.objectMatchAny(&[_][]const u8{
-            "stdout",
-            "stderr",
-        })) |match| {
-            const swh = util.Swhash(16);
-            switch (swh.match(match.key)) {
-                swh.case("stdout") => {
-                    result.stdout = match.value.stringBuffer(stdout_buf) catch |err| switch (err) {
-                        error.NoSpaceLeft => stdout_buf,
-                        else => |e| return e,
-                    };
-                },
-                swh.case("stderr") => {
-                    result.stderr = match.value.stringBuffer(stderr_buf) catch |err| switch (err) {
-                        error.NoSpaceLeft => stderr_buf,
-                        else => |e| return e,
-                    };
-                },
-                else => unreachable,
-            }
-            _ = try match.value.finalizeToken();
-        }
-        return result;
-    }
-
-    const GithubIssue = struct { repo: Buffer(0x100), number: u32, title: Buffer(0x100), url: Buffer(0x100) };
-    const RunResult = struct {
-        stdout: []u8,
-        stderr: []u8,
-    };
-    // from https://gist.github.com/thomasbnt/b6f455e2c7d743b796917fa3c205f812
-    const HexColor = enum(u24) {
-        black = 0,
-        aqua = 0x1ABC9C,
-        green = 0x2ECC71,
-        blue = 0x3498DB,
-        red = 0xE74C3C,
-        gold = 0xF1C40F,
-        _,
-
-        pub fn init(raw: u32) HexColor {
-            return @intToEnum(HexColor, raw);
-        }
-    };
 };
 
 pub fn main() !void {
-    std.os.sigaction(
-        std.os.SIGUSR1,
-        &std.os.Sigaction{
-            .handler = .{
-                .handler = struct {
-                    fn handler(signum: c_int) callconv(.C) void {
-                        const err = std.os.execveZ(
-                            std.os.argv[0],
-                            @ptrCast([*:null]?[*:0]u8, std.os.argv.ptr),
-                            @ptrCast([*:null]?[*:0]u8, std.os.environ.ptr),
-                        );
-
-                        std.debug.print("{s}\n", .{@errorName(err)});
-                    }
-                }.handler,
-            },
-            .mask = std.os.empty_sigset,
-            .flags = 0,
-        },
-        null,
-    );
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     NotifCooldown = std.StringHashMap(i64).init(&gpa.allocator);
 
@@ -717,7 +471,7 @@ const DiscordWs = struct {
 
         result.heartbeat_seq = null;
         result.heartbeat_ack = true;
-        result.heartbeat_thread = try std.Thread.spawn(result, heartbeatHandler);
+        result.heartbeat_thread = try std.Thread.spawn(heartbeatHandler, result);
 
         return result;
     }
