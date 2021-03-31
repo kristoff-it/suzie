@@ -1,0 +1,13 @@
+[Unit]
+Description=suzie
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/bin/bash -c "DISCORD_AUTH=$(cat /home/.suziebot) /home/suziebot"
+NoNewPrivileges=yes
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
