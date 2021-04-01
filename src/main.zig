@@ -3,17 +3,14 @@ const zCord = @import("zCord");
 
 const util = @import("util.zig");
 
-const suzie_id = "809094603680514088";
-
 var NotifCooldown: std.StringHashMap(i64) = undefined;
 
-fn roleIdFromGuild(gid: []const u8) ![]const u8 {
-    const swh = util.Swhash(32);
-    return switch (swh.match(gid)) {
+fn roleIdFromGuild(gid: zCord.Snowflake(.guild)) !zCord.Snowflake(.role) {
+    return switch (@enumToInt(gid)) {
         // Showtime
-        swh.case("697519923273924658") => "759242430456660018",
+        697519923273924658 => zCord.Snowflake(.role).init(759242430456660018),
         // Main
-        swh.case("605571803288698900") => "813098928550969385",
+        605571803288698900 => zCord.Snowflake(.role).init(813098928550969385),
         else => error.UnknownGuild,
     };
 }
@@ -56,77 +53,6 @@ fn Buffer(comptime max_len: usize) type {
     };
 }
 
-const Context = struct {
-    allocator: *std.mem.Allocator,
-    auth_token: []const u8,
-
-    pub fn init(allocator: *std.mem.Allocator, auth_token: []const u8) !*Context {
-        const result = try allocator.create(Context);
-        errdefer allocator.destroy(result);
-
-        result.allocator = allocator;
-        result.auth_token = auth_token;
-
-        return result;
-    }
-
-    pub fn toggleUserRole(
-        self: Context,
-        guild_id: []const u8,
-        live_role_id: []const u8,
-        user_id: []const u8,
-        action: enum { add, rem },
-    ) !void {
-        var path_buf: [0x100]u8 = undefined;
-
-        const path = try std.fmt.bufPrint(&path_buf, "/api/v8/guilds/{s}/members/{s}/roles/{s}", .{
-            guild_id,
-            user_id,
-            live_role_id,
-        });
-
-        std.debug.print("\ntoggle: {e} {s} \n", .{ action, path });
-        var req = try zCord.https.Request.init(.{
-            .allocator = self.allocator,
-            .host = "discord.com",
-            .method = if (action == .add) .PUT else .DELETE,
-            .path = path,
-        });
-        defer req.deinit();
-
-        try req.client.writeHeaderValue("Accept", "application/json");
-        try req.client.writeHeaderValue("Content-Type", "application/json");
-        try req.client.writeHeaderValue("Authorization", self.auth_token);
-
-        try req.printSend("\n\n", .{});
-
-        if (req.expectSuccessStatus()) |_| {
-            try req.completeHeaders();
-            return;
-        } else |err| switch (err) {
-            error.TooManyRequests => {
-                try req.completeHeaders();
-
-                var stream = zCord.json.stream(req.client.reader());
-                const root = try stream.root();
-
-                if (try root.objectMatchOne("retry_after")) |match| {
-                    const sec = try match.value.number(f64);
-                    // Don't bother trying for awhile
-                    std.time.sleep(@floatToInt(u64, sec * std.time.ns_per_s));
-                }
-                return error.TooManyRequests;
-            },
-            else => {
-                // var buf: [1024]u8 = undefined;
-                // const n = try req.client.reader().readAll(&buf);
-                // std.debug.print("toggle error: {s}\n", .{buf[0..n]});
-                return err;
-            },
-        }
-    }
-};
-
 pub fn main() !void {
     try zCord.root_ca.preload(std.heap.page_allocator);
 
@@ -134,15 +60,10 @@ pub fn main() !void {
     NotifCooldown = std.StringHashMap(i64).init(&gpa.allocator);
 
     var auth_buf: [0x100]u8 = undefined;
-    const context = try Context.init(
-        &gpa.allocator,
-        try std.fmt.bufPrint(&auth_buf, "Bot {s}", .{std.os.getenv("DISCORD_AUTH") orelse return error.AuthNotFound}),
-    );
 
-    var c = try zCord.Client.create(.{
-        .allocator = context.allocator,
-        .auth_token = context.auth_token,
-        .context = context,
+    const c = try zCord.Client.create(.{
+        .allocator = &gpa.allocator,
+        .auth_token = try std.fmt.bufPrint(&auth_buf, "Bot {s}", .{std.os.getenv("DISCORD_AUTH") orelse return error.AuthNotFound}),
         .intents = .{ .guild_presences = true },
     });
     defer c.destroy();
@@ -153,37 +74,33 @@ pub fn main() !void {
                 return;
             }
 
-            var user_id = Buffer(1024){};
-            var guild_id = Buffer(1024){};
+            var user_id = zCord.Snowflake(.user).init(0);
+            var guild_id = zCord.Snowflake(.guild).init(0);
             var url = Buffer(1024){};
             var created_at: ?i64 = null;
             var details = Buffer(1024){};
             var found = false;
-            var roles = std.ArrayList([]const u8).init(client.allocator);
-            defer {
-                for (roles.items) |x| client.allocator.free(x);
-                roles.deinit();
-            }
+            var roles = std.ArrayList(zCord.Snowflake(.role)).init(client.allocator);
+            defer roles.deinit();
 
             while (try data.objectMatch(enum { user, roles, guild_id, activities })) |match| switch (match) {
                 .user => |e_user| {
                     const id = (try e_user.objectMatchOne("id")) orelse return;
 
-                    const len = (try id.value.stringBuffer(&user_id.data)).len;
-                    user_id.len = len;
+                    user_id = try zCord.Snowflake(.user).consumeJsonElement(id.value);
 
                     // Leave if it's ourselves
-                    if (std.mem.eql(u8, suzie_id, user_id.slice())) return;
+                    if (client.connect_info.?.user_id == user_id) return;
+
+                    _ = try e_user.finalizeToken();
                 },
                 .guild_id => |e_guild_id| {
-                    const len = (try e_guild_id.stringBuffer(&guild_id.data)).len;
-                    guild_id.len = len;
+                    guild_id = try zCord.Snowflake(.guild).consumeJsonElement(e_guild_id);
+                    _ = try e_guild_id.finalizeToken();
                 },
                 .roles => |e_roles| {
                     while (try e_roles.arrayNext()) |elem| {
-                        var r = try elem.stringReader();
-                        try roles.append(try r.readAllAlloc(client.allocator, 1024));
-
+                        try roles.append(try zCord.Snowflake(.role).consumeJsonElement(elem));
                         // var buf: [100]u8 = undefined;
                         // const role = try elem.stringBuffer(&buf);
                         // if (std.mem.eql(u8, role, live_role_id)) {
@@ -192,6 +109,7 @@ pub fn main() !void {
                         //     break;
                         // }
                     }
+                    _ = try e_roles.finalizeToken();
                 },
                 .activities => |e_activities| {
                     //   [{
@@ -231,9 +149,9 @@ pub fn main() !void {
                 },
             };
 
-            const live_role_id = try roleIdFromGuild(guild_id.slice());
+            const live_role_id = try roleIdFromGuild(guild_id);
             const has_live_role = for (roles.items) |x| {
-                if (std.mem.eql(u8, x, live_role_id)) {
+                if (x == live_role_id) {
                     break true;
                 }
             } else false;
@@ -247,16 +165,66 @@ pub fn main() !void {
 
             std.debug.print("\n\n>> found = {b} uid = {s} guild_id = {s} url = {s} time = {any} desc = {s}\n\n\n", .{
                 found,
-                user_id.slice(),
-                guild_id.slice(),
+                user_id,
+                guild_id,
                 url.slice(),
                 created_at,
                 details.slice(),
             });
             if (found) {
-                if (!has_live_role) try client.ctx(Context).toggleUserRole(guild_id.slice(), live_role_id, user_id.slice(), .add);
+                if (!has_live_role) try toggleUserRole(client, guild_id, live_role_id, user_id, .add);
             } else {
-                if (has_live_role) try client.ctx(Context).toggleUserRole(guild_id.slice(), live_role_id, user_id.slice(), .rem);
+                if (has_live_role) try toggleUserRole(client, guild_id, live_role_id, user_id, .rem);
+            }
+        }
+
+        pub fn toggleUserRole(
+            client: *zCord.Client,
+            guild_id: zCord.Snowflake(.guild),
+            live_role_id: zCord.Snowflake(.role),
+            user_id: zCord.Snowflake(.user),
+            action: enum { add, rem },
+        ) !void {
+            var path_buf: [0x100]u8 = undefined;
+
+            const path = try std.fmt.bufPrint(&path_buf, "/api/v8/guilds/{s}/members/{s}/roles/{s}", .{
+                guild_id,
+                user_id,
+                live_role_id,
+            });
+
+            std.debug.print("\ntoggle: {e} {s} \n", .{ action, path });
+            var req = try client.sendRequest(
+                client.allocator,
+                if (action == .add) .PUT else .DELETE,
+                path,
+                null,
+            );
+            defer req.deinit();
+
+            if (req.expectSuccessStatus()) |_| {
+                try req.completeHeaders();
+                return;
+            } else |err| switch (err) {
+                error.TooManyRequests => {
+                    try req.completeHeaders();
+
+                    var stream = zCord.json.stream(req.client.reader());
+                    const root = try stream.root();
+
+                    if (try root.objectMatchOne("retry_after")) |match| {
+                        const sec = try match.value.number(f64);
+                        // Don't bother trying for awhile
+                        std.time.sleep(@floatToInt(u64, sec * std.time.ns_per_s));
+                    }
+                    return error.TooManyRequests;
+                },
+                else => {
+                    // var buf: [1024]u8 = undefined;
+                    // const n = try req.client.reader().readAll(&buf);
+                    // std.debug.print("toggle error: {s}\n", .{buf[0..n]});
+                    return err;
+                },
             }
         }
     });
