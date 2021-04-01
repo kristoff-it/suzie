@@ -1,0 +1,7 @@
+deps:
+  zCord:
+    src:
+      github:
+        user: fengb
+        repo: zCord
+        ref: master
