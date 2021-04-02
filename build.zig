@@ -15,7 +15,11 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("suziebot", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-    deps.pkgs.addAllTo(exe);
+    if (@hasDecl(deps, "addAllTo")) {
+        deps.addAllTo(exe);
+    } else {
+        deps.pkgs.addAllTo(exe);
+    }
     exe.linkSystemLibrary("pthread");
     exe.install();
 
