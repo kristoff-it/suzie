@@ -20,7 +20,6 @@ pub fn build(b: *std.build.Builder) void {
     } else {
         deps.pkgs.addAllTo(exe);
     }
-    exe.linkSystemLibrary("pthread");
     exe.install();
 
     const main_tests = b.addTest("src/main.zig");
