@@ -1,4 +1,4 @@
-github fengb zCord master src/main.zig c66e2ca78caef507bc973994ec61994a0ffb8ec0
+github fengb zCord master src/main.zig af436c36a0d58d6d9b8fd34433de90bce40e0498
 pkg default truemedian hzzp 0.0.2
-github truemedian wz master src/main.zig 3a867771aaec734f59a425ce982a3b74011c098a
-github fengb iguanaTLS fix-base64 src/main.zig 00ae14521c3847642415fede17e9d71ee6d22b1c
+pkg default truemedian wz 0.0.1
+pkg default alexnask iguanaTLS 0.0.1
