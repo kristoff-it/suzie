@@ -69,8 +69,8 @@ pub fn main() !void {
             .status = .online,
             .activities = &[_]zCord.Gateway.Activity{
                 .{
-                    .@"type" = 0,
-                    .name = "If your stream has Zig and ⚡ in the title I will promote it!",
+                    .@"type" = .Game,
+                    .name = "If your stream has Zig and ⚡ anywhere in the title I will promote it!",
                 },
             },
         },
