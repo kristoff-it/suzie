@@ -207,7 +207,7 @@ pub fn main() !void {
                 client.allocator,
                 if (action == .add) .PUT else .DELETE,
                 path,
-                null,
+                "\n\n",
             );
             defer req.deinit();
 
