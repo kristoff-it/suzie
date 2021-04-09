@@ -65,6 +65,15 @@ pub fn main() !void {
         .allocator = &gpa.allocator,
         .auth_token = try std.fmt.bufPrint(&auth_buf, "Bot {s}", .{std.os.getenv("DISCORD_AUTH") orelse return error.AuthNotFound}),
         .intents = .{ .guild_presences = true },
+        .presence = .{
+            .status = .online,
+            .activities = &[_]zCord.Gateway.Activity{
+                .{
+                    .@"type" = 0,
+                    .name = "If your stream has Zig and ⚡ in the title I will promote it!",
+                },
+            },
+        },
     });
     defer c.destroy();
 
