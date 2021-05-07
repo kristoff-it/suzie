@@ -211,11 +211,11 @@ pub fn main() !void {
             );
             defer req.deinit();
 
-            if (req.expectSuccessStatus()) |_| {
+            if (req.response_code.?.group() == .success) {
                 try req.completeHeaders();
                 return;
-            } else |err| switch (err) {
-                error.TooManyRequests => {
+            } else switch (req.response_code.?) {
+                .client_too_many_requests => {
                     try req.completeHeaders();
 
                     var stream = zCord.json.stream(req.client.reader());
@@ -232,7 +232,7 @@ pub fn main() !void {
                     // var buf: [1024]u8 = undefined;
                     // const n = try req.client.reader().readAll(&buf);
                     // std.debug.print("toggle error: {s}\n", .{buf[0..n]});
-                    return err;
+                    return error.UnknownResponse;
                 },
             }
         }
